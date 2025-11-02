@@ -6,8 +6,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from bs4 import BeautifulSoup
 import time
 import random
-import pandas as pd  # ✅ Added for DataFrame and CSV handling
-
+import pandas as pd  
 
 class FacebookScraper:
     def __init__(self, email, password):
@@ -219,7 +218,7 @@ class FacebookScraper:
         """Save posts data to CSV"""
         df = pd.DataFrame(posts_data)
         df.to_csv(filename, index=False, encoding="utf-8-sig")
-        print(f"✅ Saved {len(df)} posts to {filename}")
+        print(f"Saved {len(df)} posts to {filename}")
         return df
 
     def close(self):
