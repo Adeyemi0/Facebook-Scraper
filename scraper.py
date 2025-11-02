@@ -6,7 +6,8 @@ from selenium.webdriver.support import expected_conditions as EC
 from bs4 import BeautifulSoup
 import time
 import random
-import json
+import pandas as pd  # ✅ Added for DataFrame and CSV handling
+
 
 class FacebookScraper:
     def __init__(self, email, password):
@@ -67,6 +68,60 @@ class FacebookScraper:
         """Scroll the page slowly"""
         self.driver.execute_script(f"window.scrollBy(0, {step});")
         time.sleep(2)
+
+    def _element_has_play_text(self, tag):
+        """Helper: check if a tag's textual attributes indicate a play button/overlay"""
+        for attr_name in ('aria-label', 'title', 'alt', 'data-testid', 'role'):
+            val = tag.get(attr_name)
+            if isinstance(val, str) and 'play' in val.lower():
+                return True
+        classes = tag.get("class", [])
+        if isinstance(classes, (list, tuple)):
+            for c in classes:
+                if 'play' in c.lower():
+                    return True
+        return False
+
+    def detect_content_type(self, post):
+        """
+        Robust content detector:
+        - First check direct <video> tags
+        - Then look for play overlays / data-testid indicators
+        - Then fallback to <img>
+        - Else text
+        """
+        if post.find("video"):
+            return "video"
+        
+        for tag in post.find_all(attrs=True):
+            for attr_k, attr_v in tag.attrs.items():
+                if isinstance(attr_v, str) and ('video' in attr_v.lower() or 'playable' in attr_v.lower()):
+                    return "video"
+                if isinstance(attr_v, (list, tuple)):
+                    for item in attr_v:
+                        if isinstance(item, str) and ('video' in item.lower() or 'playable' in item.lower()):
+                            return "video"
+
+        play_candidates = post.find_all(['button', 'a', 'div', 'span', 'svg'])
+        for cand in play_candidates:
+            if self._element_has_play_text(cand):
+                return "video"
+
+        role_pres = post.find_all(attrs={"role": "presentation"})
+        if role_pres:
+            for rp in role_pres:
+                if rp.find("video"):
+                    return "video"
+                if rp.find("img"):
+                    for cand in rp.find_all(['button', 'svg', 'a', 'div', 'span']):
+                        if self._element_has_play_text(cand):
+                            return "video"
+                else:
+                    return "video"
+
+        if post.find("img"):
+            return "image"
+        return "text"
         
     def extract_posts_with_bs(self):
         """Extract posts data using BeautifulSoup"""
@@ -78,29 +133,55 @@ class FacebookScraper:
         
         for post in posts:
             try:
+                # --- POST TEXT ---
                 message_elements = post.find_all("div", {"data-ad-preview": "message"})
                 post_text = " ".join([msg.get_text(strip=True) for msg in message_elements])
                 
+                # Fallback for plain-text posts
+                if not post_text:
+                    fallback_divs = post.find_all("div", class_="xdj266r")
+                    post_texts = []
+                    for div in fallback_divs:
+                        text = div.get_text(" ", strip=True)
+                        if text and len(text.split()) > 2:
+                            post_texts.append(text)
+                    post_text = " ".join(post_texts).strip() if post_texts else None
+                
+                # --- LIKES, COMMENTS, SHARES ---
                 likes_element = post.select_one("span.xt0b8zv.x1jx94hy.xrbpyxo.xl423tq > span > span")
                 likes = likes_element.get_text(strip=True) if likes_element else None
                 
                 comments_element = post.select("div > div > span > div > div > div > span > span.html-span ")
                 comments = comments_element[0].text if comments_element else None
                 
-                
-                shares_element =post.select("div > div > span > div > div > div > span > span.html-span ")
-                shares = shares_element[1].text if shares_element else None
+                shares_element = post.select("div > div > span > div > div > div > span > span.html-span ")
+                shares = shares_element[1].text if len(shares_element) > 1 else None
 
-                timeelement=post.select_one("div.xu06os2.x1ok221b > span > div > span > span > a > span")
-                post_time= timeelement.get_text(strip=True) if timeelement else None
+                # --- TIME POSTED ---
+                timeelement = post.select_one("div.xu06os2.x1ok221b > span > div > span > span > a > span")
+                post_time = timeelement.get_text(strip=True) if timeelement else None
 
-                
+                # --- CONTENT TYPE ---
+                content_type = self.detect_content_type(post)
+
+                # --- POST LINK ---
+                post_link = None
+                for a_tag in post.find_all("a", href=True):
+                    href = a_tag["href"]
+                    if any(pattern in href for pattern in ["/posts/", "/videos/", "/reel/", "/photo/", "/story/"]):
+                        if href.startswith("/"):
+                            href = "https://www.facebook.com" + href
+                        post_link = href.split("?")[0]
+                        break
+
                 posts_data.append({
                     "post_text": post_text,
                     "likes": likes,
                     "comments": comments,
                     "shares": shares,
-                    "post_time": post_time
+                    "post_time": post_time,
+                    "content_type": content_type,
+                    "post_link": post_link
                 })
             except Exception as e:
                 print("Error extracting post data:", e)
@@ -127,7 +208,6 @@ class FacebookScraper:
             all_posts.extend(posts)
             all_posts = self.remove_duplicates(all_posts)
             print(f"Extracted {len(all_posts)} unique posts so far.")
-            # print(all_posts)
             self.slow_scroll()
             
             if len(all_posts) >= max_posts:
@@ -135,43 +215,30 @@ class FacebookScraper:
                 
         return all_posts[:max_posts]
 
+    def save_to_csv(self, posts_data, filename="facebook_posts.csv"):
+        """Save posts data to CSV"""
+        df = pd.DataFrame(posts_data)
+        df.to_csv(filename, index=False, encoding="utf-8-sig")
+        print(f"✅ Saved {len(df)} posts to {filename}")
+        return df
 
-
-    def print_posts(self, posts_data):
-        """Print the scraped posts data"""
-        for idx, post in enumerate(posts_data, start=1):
-            print(f"Post {idx}:")
-            print(f"Text: {post['post_text']}")
-            print(f"Likes: {post['likes']}")
-            print(f"Comments: {post['comments']}")
-            print(f"Shares: {post['shares']}")
-            print(f"Time Posted: {post['post_time']}")
-            print("-" * 50)
-            
     def close(self):
         """Close the browser"""
         if self.driver:
             self.driver.quit()
 
+
 # Example usage
 if __name__ == "__main__":
-    # Initialize the scraper
-    scraper = FacebookScraper("yourEmail", "yourPassword")
+    scraper = FacebookScraper("mail", "password")
     
     try:
-        # Setup and login
         scraper.initialize_driver()
         scraper.login()
+        scraper.navigate_to_profile("https://www.facebook.com/accountpage")
         
-        # Navigate to Cristiano Ronaldo's profile
-        scraper.navigate_to_profile("https://www.facebook.com/cnn")
-        
-        # Scrape 10 posts
-        posts_data = scraper.scrape_posts(max_posts=10)
-        
-        # Print the results
-        scraper.print_posts(posts_data)
+        posts_data = scraper.scrape_posts(max_posts=600)
+        df = scraper.save_to_csv(posts_data) 
         
     finally:
-        # Clean up
         scraper.close()
